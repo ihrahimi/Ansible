@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/ihrahimi/Ansible/compare/v1.0.1...v1.1.0) (2025-08-15)
+
+
+### Features
+
+* ansible-hardenging+initial setup ([643a82c](https://github.com/ihrahimi/Ansible/commit/643a82c87e2a548adf7e8c778b883e518146e57e))
+
 ## [1.0.1](https://github.com/ihrahimi/Ansible/compare/v1.0.0...v1.0.1) (2025-08-14)
 
 
