@@ -1,163 +1,94 @@
 ---
-- name: Ubuntu Server Hardening
+- name: Phase 2 - Full System Hardening
   hosts: all
   become: true
   vars:
-    # SSH Configuration
-    ssh_port: 19200  # Change from default 22
-    ssh_password_auth: "no"
-    ssh_root_login: "no"
-    ssh_max_auth_tries: 3
-    ssh_max_sessions: 3
-    
-    # System Users
-    admin_user: "ansible_admin"
-    admin_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJGC4GVUTGKdIID2YF5aH6Ky0sJdxD1+m6U7mYkdjAoW"
-    
-    # Firewall Rules
-    allowed_ports:
-      - "{{ ssh_port }}"
-      - "80"
-      - "443"
-    
-    # Automatic Updates
-    auto_update_enable: true
-    auto_update_reboot: false
-
-    # System Limits
-    security_limits:
-      - { domain: '*', limit_type: '-', limit_item: nofile, value: '64000' }
-      - { domain: '*', limit_type: '-', limit_item: nproc, value: '64000' }
-      - { domain: '*', limit_type: '-', limit_item: core, value: '0' }
+    # Security configurations
+    ssh_password_auth: "no"             # Disable password auth
+    ssh_root_login: "no"               # Disable root login
+    ssh_max_auth_tries: 3              # Login attempt limits
+    allowed_ports: [80, 443]           # Additional open ports
+    auto_update_enable: true           # Enable automatic security updates
 
   tasks:
-    # Update all packages
-    - name: Update all packages
-      apt:
-        update_cache: yes
-        upgrade: dist
-        autoremove: yes
-
-    # Create admin user with sudo
-    - name: Create admin user
-      user:
-        name: "{{ admin_user }}"
-        groups: sudo
-        shell: /bin/bash
-        append: yes
-
-    - name: Add SSH key for admin user
-      ansible.posix.authorized_key:
-        user: "{{ admin_user }}"
+    ### SSH Hardening ###
+    - name: Disable SSH password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: "PasswordAuthentication {{ ssh_password_auth }}"
         state: present
-        key: "{{ admin_ssh_key }}"
+      notify: restart sshd
 
-    # SSH Hardening
-    - name: Configure SSH
-      template:
-        src: sshd_config.j2
-        dest: /etc/ssh/sshd_config
-        owner: root
-        group: root
-        mode: 0644
-      notify: restart ssh
+    - name: Disable root login via SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: "PermitRootLogin {{ ssh_root_login }}"
+        state: present
+      notify: restart sshd
 
-    - name: Ensure SSH service is enabled
-      service:
-        name: ssh
-        enabled: yes
-        state: started
+    - name: Set SSH max authentication attempts
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?MaxAuthTries'
+        line: "MaxAuthTries {{ ssh_max_auth_tries }}"
+        state: present
+      notify: restart sshd
 
-    # Firewall Configuration
-    - name: Install UFW
+    ### Firewall Configuration ###
+    - name: Ensure UFW is installed
       apt:
         name: ufw
         state: present
 
-    - name: Configure default UFW rules
+    - name: Configure default firewall rules
       ufw:
-        state: enabled
         direction: incoming
         policy: deny
-        route: yes
+        state: enabled
 
-    - name: Allow specific ports
+    - name: Allow essential ports
       ufw:
         rule: allow
         port: "{{ item }}"
         proto: tcp
-      loop: "{{ allowed_ports }}"
+      loop: "{{ [ansible_port] + allowed_ports }}"
 
-    # System Hardening
-    - name: Disable root login
+    ### System Hardening ###
+    - name: Disable root password
       command: passwd -l root
       when: ssh_root_login == "no"
 
-    - name: Set password aging policies
+    - name: Configure password aging
       pam_limits:
         dest: /etc/login.defs
-        backup: yes
         changes:
           - "PASS_MAX_DAYS 90"
           - "PASS_MIN_DAYS 7"
           - "PASS_WARN_AGE 14"
 
-    # Corrected System Limits Configuration
-    - name: Configure security limits
-      pam_limits:
-        domain: "{{ item.domain }}"
-        limit_type: "{{ item.limit_type }}"
-        limit_item: "{{ item.limit_item }}"
-        value: "{{ item.value }}"
-      loop: "{{ security_limits }}"
-      ignore_errors: yes
+    - name: Set secure umask
+      lineinfile:
+        path: /etc/profile
+        regexp: '^umask'
+        line: "umask 027"
 
-    - name: Configure sudoers file
-      copy:
-        dest: /etc/sudoers.d/99-hardening
-        content: |
-          Defaults        passwd_tries=3
-          Defaults        badpass_message="Invalid password!"
-          Defaults        requiretty
-          Defaults        secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-          Defaults        timestamp_timeout=15
-          Defaults        env_reset
-          Defaults        mail_badpass
-          Defaults        use_pty
-
-    # Install and configure fail2ban
-    - name: Install fail2ban
-      apt:
-        name: fail2ban
-        state: present
-
-    - name: Configure fail2ban
-      template:
-        src: jail.local.j2
-        dest: /etc/fail2ban/jail.local
-      notify: restart fail2ban
-
-    # Configure automatic updates
-    - name: Configure automatic updates
+    ### Automatic Updates ###
+    - name: Install unattended-upgrades
       apt:
         name: unattended-upgrades
         state: present
 
-    - name: Configure auto-update settings
+    - name: Configure automatic security updates
       copy:
-        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
         content: |
-          Unattended-Upgrade::Allowed-Origins {
-              "Ubuntu:{{ ansible_distribution_release }}-security";
-          };
-          Unattended-Upgrade::Package-Blacklist {
-          };
-          Unattended-Upgrade::Automatic-Reboot "{{ auto_update_reboot | lower }}";
-          Unattended-Upgrade::Automatic-Reboot-Time "02:00";
-          Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
-          Unattended-Upgrade::Remove-Unused-Dependencies "true";
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          APT::Periodic::AutocleanInterval "7";
 
-    # Kernel hardening
+    ### Kernel Hardening ###
     - name: Configure sysctl parameters
       sysctl:
         name: "{{ item.name }}"
@@ -166,48 +97,39 @@
         reload: yes
       loop:
         - { name: net.ipv4.conf.all.rp_filter, value: 1 }
-        - { name: net.ipv4.conf.default.rp_filter, value: 1 }
         - { name: net.ipv4.tcp_syncookies, value: 1 }
         - { name: net.ipv4.conf.all.accept_redirects, value: 0 }
-        - { name: net.ipv6.conf.all.accept_redirects, value: 0 }
-        - { name: net.ipv4.conf.all.send_redirects, value: 0 }
         - { name: kernel.kptr_restrict, value: 2 }
-        - { name: kernel.dmesg_restrict, value: 1 }
 
-    # Install and configure auditd
-    - name: Install auditd
+    ### Monitoring ###
+    - name: Install and configure auditd
       apt:
         name: auditd
         state: present
 
-    - name: Configure audit rules
+    - name: Enable important audit rules
       copy:
         dest: /etc/audit/rules.d/hardening.rules
         content: |
-          -a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
-          -a always,exit -F arch=b32 -S adjtimex -S settimeofday -S stime -k time-change
-          -a always,exit -F arch=b64 -S clock_settime -k time-change
-          -a always,exit -F arch=b32 -S clock_settime -k time-change
-          -w /etc/localtime -p wa -k time-change
-          -w /etc/group -p wa -k identity
+          -a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -k setuid
           -w /etc/passwd -p wa -k identity
-          -w /etc/gshadow -p wa -k identity
           -w /etc/shadow -p wa -k identity
-          -w /etc/security/opasswd -p wa -k identity
-      notify: restart auditd
+
+    ### Cleanup ###
+    - name: Remove old SSH port (22) from config
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^Port 22'
+        state: absent
+      notify: restart sshd
 
   handlers:
-    - name: restart ssh
+    - name: restart sshd
       service:
         name: ssh
         state: restarted
 
-    - name: restart fail2ban
-      service:
-        name: fail2ban
-        state: restarted
-
-    - name: restart auditd
+    - name: reload auditd
       service:
         name: auditd
-        state: restarted
+        state: reloaded
