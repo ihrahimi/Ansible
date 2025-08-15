@@ -1,36 +1,61 @@
 ---
-- name: Phase 2 - Server Hardening with iptables
+- name: Phase 2 - Complete Server Hardening
   hosts: all
   become: true
   vars:
-    allowed_ports:
-      - 80   # HTTP
-      - 443  # HTTPS
+    # Network Configuration
+    new_ssh_port: 19200             # MUST match Phase 1 value
+    allowed_tcp_ports: [80, 443]    # Web ports
+    allowed_udp_ports: []           # Example: [53] for DNS
+    
+    # System Hardening
+    security_limits:
+      - { domain: '*', limit_type: '-', limit_item: nofile, value: '64000' }
+      - { domain: '*', limit_type: '-', limit_item: nproc, value: '64000' }
+      - { domain: '*', limit_type: '-', limit_item: core, value: '0' }
 
   tasks:
-    ### SSH Hardening ###
-    - name: Disable SSH password authentication
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?PasswordAuthentication'
-        line: "PasswordAuthentication no"
-        state: present
-      notify: restart sshd
-
-    - name: Disable root login
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?PermitRootLogin'
-        line: "PermitRootLogin no"
-        state: present
-      notify: restart sshd
-
-    ### iptables Configuration ###
-    - name: Flush existing iptables rules
+    ### 1. Connection Preservation ###
+    - name: Allow established connections
       iptables:
-        flush: true
+        chain: INPUT
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+        comment: "Allow established connections"
 
-    - name: Set default policies
+    - name: Allow current SSH port
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "{{ new_ssh_port }}"
+        jump: ACCEPT
+        comment: "Allow SSH on custom port"
+
+    ### 2. SSH Hardening ###
+    - name: Configure SSH security
+      block:
+        - name: Disable password authentication
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?PasswordAuthentication'
+            line: "PasswordAuthentication no"
+            
+        - name: Disable root login
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?PermitRootLogin'
+            line: "PermitRootLogin no"
+            
+        - name: Enable strict modes
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?StrictModes'
+            line: "StrictModes yes"
+            
+      notify: restart sshd
+
+    ### 3. Firewall Configuration ###
+    - name: Set default firewall policies
       iptables:
         chain: "{{ item.chain }}"
         policy: "{{ item.policy }}"
@@ -39,39 +64,61 @@
         - { chain: FORWARD, policy: DROP }
         - { chain: OUTPUT, policy: ACCEPT }
 
-    - name: Allow loopback traffic
-      iptables:
-        chain: INPUT
-        in_interface: lo
-        jump: ACCEPT
+    - name: Configure base firewall rules
+      block:
+        - name: Allow loopback
+          iptables:
+            chain: INPUT
+            in_interface: lo
+            jump: ACCEPT
 
-    - name: Allow established connections
-      iptables:
-        chain: INPUT
-        ctstate: ESTABLISHED,RELATED
-        jump: ACCEPT
+        - name: Allow ICMP (ping)
+          iptables:
+            chain: INPUT
+            protocol: icmp
+            jump: ACCEPT
 
-    - name: Allow ICMP (ping)
-      iptables:
-        chain: INPUT
-        protocol: icmp
-        jump: ACCEPT
+        - name: Allow essential TCP ports
+          iptables:
+            chain: INPUT
+            protocol: tcp
+            destination_port: "{{ item }}"
+            jump: ACCEPT
+          loop: "{{ [new_ssh_port] + allowed_tcp_ports }}"
 
-    - name: Allow essential ports
-      iptables:
-        chain: INPUT
-        protocol: tcp
-        destination_port: "{{ item }}"
-        jump: ACCEPT
-        comment: "Allow {{ item }}/tcp"
-      loop: "{{ [new_ssh_port] + allowed_ports }}"
+        - name: Allow essential UDP ports
+          iptables:
+            chain: INPUT
+            protocol: udp
+            destination_port: "{{ item }}"
+            jump: ACCEPT
+          loop: "{{ allowed_udp_ports }}"
 
-    - name: Save iptables rules persistently
-      command: /usr/sbin/netfilter-persistent save
-      changed_when: false
+    ### 4. System Hardening ###
+    - name: Configure security limits
+      pam_limits:
+        domain: "{{ item.domain }}"
+        limit_type: "{{ item.limit_type }}"
+        limit_item: "{{ item.limit_item }}"
+        value: "{{ item.value }}"
+      loop: "{{ security_limits }}"
 
-    ### System Hardening ###
-    - name: Configure sysctl parameters
+    - name: Secure shared memory
+      mount:
+        path: /dev/shm
+        src: tmpfs
+        fstype: tmpfs
+        opts: defaults,noexec,nosuid,nodev
+        state: present
+
+    - name: Disable core dumps
+      sysctl:
+        name: kernel.core_pattern
+        value: "|/bin/false"
+        state: present
+
+    ### 5. Kernel Hardening ###
+    - name: Configure kernel parameters
       sysctl:
         name: "{{ item.name }}"
         value: "{{ item.value }}"
@@ -81,11 +128,35 @@
         - { name: net.ipv4.conf.all.rp_filter, value: 1 }
         - { name: net.ipv4.tcp_syncookies, value: 1 }
         - { name: net.ipv4.conf.all.accept_redirects, value: 0 }
+        - { name: kernel.kptr_restrict, value: 2 }
 
-    - name: Install and configure auditd
+    ### 6. Maintenance ###
+    - name: Configure automatic updates
       apt:
-        name: auditd
+        name: unattended-upgrades
         state: present
+
+    - name: Enable security updates
+      copy:
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        content: |
+          Unattended-Upgrade::Allowed-Origins {
+              "Ubuntu:{{ ansible_distribution_release }}-security";
+          };
+          Unattended-Upgrade::Automatic-Reboot "true";
+          Unattended-Upgrade::Automatic-Reboot-Time "02:00";
+
+    ### 7. Finalize Configuration ###
+    - name: Persist iptables rules
+      command: /usr/sbin/netfilter-persistent save
+      changed_when: false
+
+    - name: Remove old SSH port from config
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^Port 22'
+        state: absent
+      notify: restart sshd
 
   handlers:
     - name: restart sshd
