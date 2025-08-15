@@ -3,13 +3,12 @@
   hosts: all
   become: true
   vars:
-    current_ssh_port: 22           # Default SSH port (before change)
-    new_ssh_port: 19200            # New SSH port
-    temp_admin_user: "ansible_admin"  # New admin user
+    current_ssh_port: 22
+    new_ssh_port: 19200
+    temp_admin_user: "ansible_admin"
     temp_admin_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJGC4GVUTGKdIID2YF5aH6Ky0sJdxD1+m6U7mYkdjAoW"
 
   tasks:
-    # Create admin user with sudo
     - name: Create admin user
       user:
         name: "{{ temp_admin_user }}"
@@ -23,7 +22,6 @@
         state: present
         key: "{{ temp_admin_ssh_key }}"
 
-    # Configure new SSH port (temporarily keep old port during transition)
     - name: Backup sshd_config
       copy:
         src: /etc/ssh/sshd_config
@@ -38,13 +36,22 @@
         state: present
       notify: restart sshd
 
-    # Allow new port in firewall (if UFW is used)
-    - name: Allow new SSH port in UFW
-      ufw:
-        rule: allow
-        port: "{{ new_ssh_port }}"
-        proto: tcp
-      when: ansible_facts.services['ufw.service'] is defined
+    - name: Install iptables-persistent
+      apt:
+        name: iptables-persistent
+        state: present
+
+    - name: Allow new SSH port via iptables
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "{{ new_ssh_port }}"
+        jump: ACCEPT
+        comment: "Allow custom SSH port"
+
+    - name: Save iptables rules
+      command: /usr/sbin/netfilter-persistent save
+      changed_when: false
 
   handlers:
     - name: restart sshd
