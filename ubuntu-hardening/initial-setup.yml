@@ -1,5 +1,5 @@
 ---
-- name: Phase 1 - Initial Server Configuration
+- name: Phase 1 - Initial Configuration Without Reboot
   hosts: all
   become: true
   vars:
@@ -9,7 +9,7 @@
     temp_admin_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJGC4GVUTGKdIID2YF5aH6Ky0sJdxD1+m6U7mYkdjAoW"
 
   tasks:
-    ### User and Access Configuration ###
+    ### 1. User and Access Setup ###
     - name: Create admin user
       user:
         name: "{{ temp_admin_user }}"
@@ -30,89 +30,46 @@
         state: present
         key: "{{ temp_admin_ssh_key }}"
 
-    ### SSH Configuration ###
-    - name: Configure new SSH port
+    ### 2. SSH Configuration ###
+    - name: Configure new SSH port (keeps old port)
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?Port'
         line: "Port {{ new_ssh_port }}"
+        insertafter: '^#?Port 22'
         state: present
       notify: restart sshd
 
-    ### Firewall Configuration ###
+    ### 3. Firewall Configuration ###
     - name: Install iptables-persistent
       apt:
         name: iptables-persistent
         state: present
 
-    - name: Allow both SSH ports temporarily
+    - name: Allow both SSH ports
       iptables:
         chain: INPUT
         protocol: tcp
         destination_port: "{{ item }}"
         jump: ACCEPT
+        comment: "SSH port {{ item }}"
       loop: [ "{{ current_ssh_port }}", "{{ new_ssh_port }}" ]
 
     - name: Persist firewall rules
       command: /usr/sbin/netfilter-persistent save
       changed_when: false
 
-    ### Completion Marker ###
-    - name: Create phase1 completion flag
-      file:
-        path: /etc/.phase1_completed
-        state: touch
-
-  handlers:
-    - name: restart sshd
-      service:
-        name: ssh
-        state: restarted
-
-- name: Reboot Servers After Configuration
-  hosts: all
-  become: true
-  vars:
-    reboot_timeout: 600  # 10 minutes
-
-  tasks:
-    - name: Check if reboot is needed
-      stat:
-        path: /etc/.phase1_completed
-      register: phase1_flag
-      changed_when: false
-
-    - name: Initiate reboot if Phase 1 completed
-      reboot:
-        msg: "Rebooting to apply Phase 1 changes"
-        connect_timeout: 60
-      when: phase1_flag.stat.exists
-
-    - name: Wait for servers to come back
-      wait_for_connection:
-        delay: 30
-        timeout: "{{ reboot_timeout }}"
-
+    ### 4. Verification ###
     - name: Verify new SSH port
       wait_for:
         port: "{{ new_ssh_port }}"
         host: "{{ inventory_hostname }}"
         timeout: 30
       delegate_to: localhost
-
-    - name: Remove old SSH port from firewall
-      iptables:
-        chain: INPUT
-        protocol: tcp
-        destination_port: "{{ current_ssh_port }}"
-        jump: ACCEPT
-        state: absent
-
-    - name: Final firewall rules save
-      command: /usr/sbin/netfilter-persistent save
       changed_when: false
 
-    - name: Cleanup completion marker
-      file:
-        path: /etc/.phase1_completed
-        state: absent
+  handlers:
+    - name: restart sshd
+      service:
+        name: ssh
+        state: restarted
