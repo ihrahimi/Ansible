@@ -65,18 +65,6 @@
       command: /usr/sbin/netfilter-persistent save
       changed_when: false
 
-    ### 4. Verification ###
-    - name: Verify new SSH port (with retries)
-      wait_for:
-        port: "{{ new_ssh_port }}"
-        host: "{{ inventory_hostname }}"
-        timeout: 20
-        delay: 5
-        active_connection_states: ESTABLISHED
-      register: port_check
-      until: port_check is succeeded
-      retries: 6
-      delegate_to: localhost
 
   handlers:
     - name: restart sshd
