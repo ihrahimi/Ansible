@@ -4,7 +4,7 @@
   become: true
   vars:
     # SSH Configuration
-    ssh_port: 2222  # Change from default 22
+    ssh_port: 19200  # Change from default 22
     ssh_password_auth: "no"
     ssh_root_login: "no"
     ssh_max_auth_tries: 3
