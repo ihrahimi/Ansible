@@ -1,0 +1,197 @@
+---
+- name: Ubuntu Server Hardening
+  hosts: all
+  become: true
+  vars:
+    # SSH Configuration
+    ssh_port: 2222  # Change from default 22
+    ssh_password_auth: "no"
+    ssh_root_login: "no"
+    ssh_max_auth_tries: 3
+    ssh_max_sessions: 3
+    
+    # System Users
+    admin_user: "ansible_admin"
+    admin_ssh_key: "ssh-rsa AAAAB3NzaC1yc2E..."
+    
+    # Firewall Rules
+    allowed_ports:
+      - "{{ ssh_port }}"
+      - "80"
+      - "443"
+    
+    # Automatic Updates
+    auto_update_enable: true
+    auto_update_reboot: false
+
+  tasks:
+    # Update all packages
+    - name: Update all packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+        autoremove: yes
+
+    # Create admin user with sudo
+    - name: Create admin user
+      user:
+        name: "{{ admin_user }}"
+        groups: sudo
+        shell: /bin/bash
+        append: yes
+
+    - name: Add SSH key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        state: present
+        key: "{{ admin_ssh_key }}"
+
+    # SSH Hardening
+    - name: Configure SSH
+      template:
+        src: sshd_config.j2
+        dest: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: 0644
+      notify: restart ssh
+
+    - name: Ensure SSH service is enabled
+      service:
+        name: ssh
+        enabled: yes
+        state: started
+
+    # Firewall Configuration
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+
+    - name: Configure default UFW rules
+      ufw:
+        state: enabled
+        direction: incoming
+        policy: deny
+        route: yes
+
+    - name: Allow specific ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ allowed_ports }}"
+
+    # System Hardening
+    - name: Disable root login
+      command: passwd -l root
+      when: ssh_root_login == "no"
+
+    - name: Set password aging policies
+      pam_limits:
+        dest: /etc/login.defs
+        backup: yes
+        changes:
+          - "PASS_MAX_DAYS 90"
+          - "PASS_MIN_DAYS 7"
+          - "PASS_WARN_AGE 14"
+
+    - name: Configure sudoers file
+      copy:
+        dest: /etc/sudoers.d/99-hardening
+        content: |
+          Defaults        passwd_tries=3
+          Defaults        badpass_message="Invalid password!"
+          Defaults        requiretty
+          Defaults        secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          Defaults        timestamp_timeout=15
+          Defaults        env_reset
+          Defaults        mail_badpass
+          Defaults        use_pty
+
+    # Install and configure fail2ban
+    - name: Install fail2ban
+      apt:
+        name: fail2ban
+        state: present
+
+    - name: Configure fail2ban
+      template:
+        src: jail.local.j2
+        dest: /etc/fail2ban/jail.local
+      notify: restart fail2ban
+
+    # Configure automatic updates
+    - name: Configure automatic updates
+      apt:
+        name: unattended-upgrades
+        state: present
+
+    - name: Configure auto-update settings
+      copy:
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        content: |
+          Unattended-Upgrade::Allowed-Origins {
+              "Ubuntu:{{ ansible_distribution_release }}-security";
+          };
+          Unattended-Upgrade::Package-Blacklist {
+          };
+          Unattended-Upgrade::Automatic-Reboot "{{ auto_update_reboot | lower }}";
+          Unattended-Upgrade::Automatic-Reboot-Time "02:00";
+          Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+          Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+    # Kernel hardening
+    - name: Configure sysctl parameters
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: net.ipv4.conf.all.rp_filter, value: 1 }
+        - { name: net.ipv4.conf.default.rp_filter, value: 1 }
+        - { name: net.ipv4.tcp_syncookies, value: 1 }
+        - { name: net.ipv4.conf.all.accept_redirects, value: 0 }
+        - { name: net.ipv6.conf.all.accept_redirects, value: 0 }
+        - { name: net.ipv4.conf.all.send_redirects, value: 0 }
+        - { name: kernel.kptr_restrict, value: 2 }
+        - { name: kernel.dmesg_restrict, value: 1 }
+
+    # Install and configure auditd
+    - name: Install auditd
+      apt:
+        name: auditd
+        state: present
+
+    - name: Configure audit rules
+      copy:
+        dest: /etc/audit/rules.d/hardening.rules
+        content: |
+          -a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
+          -a always,exit -F arch=b32 -S adjtimex -S settimeofday -S stime -k time-change
+          -a always,exit -F arch=b64 -S clock_settime -k time-change
+          -a always,exit -F arch=b32 -S clock_settime -k time-change
+          -w /etc/localtime -p wa -k time-change
+          -w /etc/group -p wa -k identity
+          -w /etc/passwd -p wa -k identity
+          -w /etc/gshadow -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/security/opasswd -p wa -k identity
+      notify: restart auditd
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: ssh
+        state: restarted
+
+    - name: restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted
+
+    - name: restart auditd
+      service:
+        name: auditd
+        state: restarted
