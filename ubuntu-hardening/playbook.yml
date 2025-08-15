@@ -24,6 +24,12 @@
     auto_update_enable: true
     auto_update_reboot: false
 
+    # System Limits
+    security_limits:
+      - { domain: '*', limit_type: '-', limit_item: nofile, value: '64000' }
+      - { domain: '*', limit_type: '-', limit_item: nproc, value: '64000' }
+      - { domain: '*', limit_type: '-', limit_item: core, value: '0' }
+
   tasks:
     # Update all packages
     - name: Update all packages
@@ -95,6 +101,16 @@
           - "PASS_MAX_DAYS 90"
           - "PASS_MIN_DAYS 7"
           - "PASS_WARN_AGE 14"
+
+    # Corrected System Limits Configuration
+    - name: Configure security limits
+      pam_limits:
+        domain: "{{ item.domain }}"
+        limit_type: "{{ item.limit_type }}"
+        limit_item: "{{ item.limit_item }}"
+        value: "{{ item.value }}"
+      loop: "{{ security_limits }}"
+      ignore_errors: yes
 
     - name: Configure sudoers file
       copy:
