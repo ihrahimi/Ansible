@@ -1,14 +1,11 @@
 ---
-- name: Phase 2 - Full System Hardening
+- name: Phase 2 - Server Hardening with iptables
   hosts: all
   become: true
   vars:
-    # Security configurations
-    ssh_password_auth: "no"             # Disable password auth
-    ssh_root_login: "no"               # Disable root login
-    ssh_max_auth_tries: 3              # Login attempt limits
-    allowed_ports: [80, 443]           # Additional open ports
-    auto_update_enable: true           # Enable automatic security updates
+    allowed_ports:
+      - 80   # HTTP
+      - 443  # HTTPS
 
   tasks:
     ### SSH Hardening ###
@@ -16,79 +13,64 @@
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PasswordAuthentication'
-        line: "PasswordAuthentication {{ ssh_password_auth }}"
+        line: "PasswordAuthentication no"
         state: present
       notify: restart sshd
 
-    - name: Disable root login via SSH
+    - name: Disable root login
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PermitRootLogin'
-        line: "PermitRootLogin {{ ssh_root_login }}"
+        line: "PermitRootLogin no"
         state: present
       notify: restart sshd
 
-    - name: Set SSH max authentication attempts
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?MaxAuthTries'
-        line: "MaxAuthTries {{ ssh_max_auth_tries }}"
-        state: present
-      notify: restart sshd
+    ### iptables Configuration ###
+    - name: Flush existing iptables rules
+      iptables:
+        flush: true
 
-    ### Firewall Configuration ###
-    - name: Ensure UFW is installed
-      apt:
-        name: ufw
-        state: present
+    - name: Set default policies
+      iptables:
+        chain: "{{ item.chain }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { chain: INPUT, policy: DROP }
+        - { chain: FORWARD, policy: DROP }
+        - { chain: OUTPUT, policy: ACCEPT }
 
-    - name: Configure default firewall rules
-      ufw:
-        direction: incoming
-        policy: deny
-        state: enabled
+    - name: Allow loopback traffic
+      iptables:
+        chain: INPUT
+        in_interface: lo
+        jump: ACCEPT
+
+    - name: Allow established connections
+      iptables:
+        chain: INPUT
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    - name: Allow ICMP (ping)
+      iptables:
+        chain: INPUT
+        protocol: icmp
+        jump: ACCEPT
 
     - name: Allow essential ports
-      ufw:
-        rule: allow
-        port: "{{ item }}"
-        proto: tcp
-      loop: "{{ [ansible_port] + allowed_ports }}"
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "{{ item }}"
+        jump: ACCEPT
+        comment: "Allow {{ item }}/tcp"
+      loop: "{{ [new_ssh_port] + allowed_ports }}"
+
+    - name: Save iptables rules persistently
+      command: /usr/sbin/netfilter-persistent save
+      changed_when: false
 
     ### System Hardening ###
-    - name: Disable root password
-      command: passwd -l root
-      when: ssh_root_login == "no"
-
-    - name: Configure password aging
-      pam_limits:
-        dest: /etc/login.defs
-        changes:
-          - "PASS_MAX_DAYS 90"
-          - "PASS_MIN_DAYS 7"
-          - "PASS_WARN_AGE 14"
-
-    - name: Set secure umask
-      lineinfile:
-        path: /etc/profile
-        regexp: '^umask'
-        line: "umask 027"
-
-    ### Automatic Updates ###
-    - name: Install unattended-upgrades
-      apt:
-        name: unattended-upgrades
-        state: present
-
-    - name: Configure automatic security updates
-      copy:
-        dest: /etc/apt/apt.conf.d/20auto-upgrades
-        content: |
-          APT::Periodic::Update-Package-Lists "1";
-          APT::Periodic::Unattended-Upgrade "1";
-          APT::Periodic::AutocleanInterval "7";
-
-    ### Kernel Hardening ###
     - name: Configure sysctl parameters
       sysctl:
         name: "{{ item.name }}"
@@ -99,37 +81,14 @@
         - { name: net.ipv4.conf.all.rp_filter, value: 1 }
         - { name: net.ipv4.tcp_syncookies, value: 1 }
         - { name: net.ipv4.conf.all.accept_redirects, value: 0 }
-        - { name: kernel.kptr_restrict, value: 2 }
 
-    ### Monitoring ###
     - name: Install and configure auditd
       apt:
         name: auditd
         state: present
-
-    - name: Enable important audit rules
-      copy:
-        dest: /etc/audit/rules.d/hardening.rules
-        content: |
-          -a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -k setuid
-          -w /etc/passwd -p wa -k identity
-          -w /etc/shadow -p wa -k identity
-
-    ### Cleanup ###
-    - name: Remove old SSH port (22) from config
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^Port 22'
-        state: absent
-      notify: restart sshd
 
   handlers:
     - name: restart sshd
       service:
         name: ssh
         state: restarted
-
-    - name: reload auditd
-      service:
-        name: auditd
-        state: reloaded
