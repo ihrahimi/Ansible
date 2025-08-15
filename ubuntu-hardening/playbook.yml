@@ -12,7 +12,7 @@
     
     # System Users
     admin_user: "ansible_admin"
-    admin_ssh_key: "ssh-rsa AAAAB3NzaC1yc2E..."
+    admin_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJGC4GVUTGKdIID2YF5aH6Ky0sJdxD1+m6U7mYkdjAoW"
     
     # Firewall Rules
     allowed_ports:
