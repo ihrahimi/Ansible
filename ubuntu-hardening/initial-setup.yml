@@ -9,6 +9,7 @@
     temp_admin_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJGC4GVUTGKdIID2YF5aH6Ky0sJdxD1+m6U7mYkdjAoW"
 
   tasks:
+    # Create admin user with sudo privileges
     - name: Create admin user
       user:
         name: "{{ temp_admin_user }}"
@@ -16,12 +17,23 @@
         shell: /bin/bash
         state: present
 
+    # Configure passwordless sudo for ansible_admin
+    - name: Configure passwordless sudo
+      copy:
+        dest: /etc/sudoers.d/99-ansible-admin
+        content: |
+          {{ temp_admin_user }} ALL=(ALL) NOPASSWD:ALL
+        validate: '/usr/sbin/visudo -cf %s'
+        mode: 0440
+
+    # Deploy SSH key for the new user
     - name: Add SSH key for admin user
       ansible.posix.authorized_key:
         user: "{{ temp_admin_user }}"
         state: present
         key: "{{ temp_admin_ssh_key }}"
 
+    # SSH Configuration
     - name: Backup sshd_config
       copy:
         src: /etc/ssh/sshd_config
@@ -36,6 +48,7 @@
         state: present
       notify: restart sshd
 
+    # Firewall Configuration
     - name: Install iptables-persistent
       apt:
         name: iptables-persistent
