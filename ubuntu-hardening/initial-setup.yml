@@ -1,5 +1,5 @@
 ---
-- name: Phase 1 - Initial Configuration Without Reboot
+- name: Phase 1 - Initial Configuration (Robust Version)
   hosts: all
   become: true
   vars:
@@ -9,7 +9,15 @@
     temp_admin_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJGC4GVUTGKdIID2YF5aH6Ky0sJdxD1+m6U7mYkdjAoW"
 
   tasks:
-    ### 1. User and Access Setup ###
+    ### 1. Pre-Flight Checks ###
+    - name: Verify current SSH connectivity
+      wait_for:
+        port: "{{ current_ssh_port }}"
+        host: "{{ inventory_hostname }}"
+        timeout: 30
+      delegate_to: localhost
+
+    ### 2. User and Access Setup ###
     - name: Create admin user
       user:
         name: "{{ temp_admin_user }}"
@@ -30,43 +38,75 @@
         state: present
         key: "{{ temp_admin_ssh_key }}"
 
-    ### 2. SSH Configuration ###
-    - name: Configure new SSH port (keeps old port)
+    ### 3. SSH Configuration ###
+    - name: Configure new SSH port
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?Port'
         line: "Port {{ new_ssh_port }}"
-        insertafter: '^#?Port 22'
         state: present
       notify: restart sshd
 
-    ### 3. Firewall Configuration ###
+    ### 4. Firewall Configuration ###
     - name: Install iptables-persistent
       apt:
         name: iptables-persistent
         state: present
 
-    - name: Allow both SSH ports
+    - name: Allow new SSH port
       iptables:
         chain: INPUT
         protocol: tcp
-        destination_port: "{{ item }}"
+        destination_port: "{{ new_ssh_port }}"
         jump: ACCEPT
-        comment: "SSH port {{ item }}"
-      loop: [ "{{ current_ssh_port }}", "{{ new_ssh_port }}" ]
+        comment: "Allow custom SSH port"
 
     - name: Persist firewall rules
       command: /usr/sbin/netfilter-persistent save
       changed_when: false
 
-    ### 4. Verification ###
-    - name: Verify new SSH port
+    ### 5. Service Management ###
+    - name: Ensure SSH service is enabled
+      service:
+        name: ssh
+        enabled: yes
+        state: restarted
+
+    ### 6. Verification with Retries ###
+    - name: Verify new SSH port (with retries)
       wait_for:
         port: "{{ new_ssh_port }}"
         host: "{{ inventory_hostname }}"
-        timeout: 30
+        timeout: 15
+        delay: 5
+        sleep: 5
+        active_connection_states: ESTABLISHED
+      register: port_check
+      until: port_check is succeeded
+      retries: 6
+      delay: 10
       delegate_to: localhost
       changed_when: false
+
+    ### 7. Fallback Verification ###
+    - name: Manual SSH port test
+      command: >
+        ssh -o StrictHostKeyChecking=no
+        -p {{ new_ssh_port }}
+        -i ~/.ssh/id_ed25519
+        {{ temp_admin_user }}@{{ inventory_hostname }}
+        exit
+      delegate_to: localhost
+      register: ssh_test
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Fail if port verification completely fails
+      fail:
+        msg: |
+          SSH port {{ new_ssh_port }} verification failed!
+          Last error: {{ ssh_test.stderr }}
+      when: ssh_test is failed
 
   handlers:
     - name: restart sshd
